@@ -2,6 +2,7 @@ const express = require("express");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../db");
 const { authMiddleware } = require("../middleware/auth");
+const { notifyActivity } = require("../notifications");
 
 const router = express.Router();
 
@@ -25,10 +26,6 @@ async function getPlatformFeePercentage() {
 
 router.post("/", authMiddleware, async (req, res) => {
   try {
-    if (req.user.userType === "provider") {
-      return res.status(403).json({ error: "Provider accounts cannot create customer bookings" });
-    }
-
     const {
       providerId,
       providerName,
@@ -52,6 +49,13 @@ router.post("/", authMiddleware, async (req, res) => {
     const bookings = db.collection("bookings");
     const feePercentage = await getPlatformFeePercentage();
 
+    let bookingProviderId = null;
+    if (providerId) {
+      if (ObjectId.isValid(providerId)) {
+        bookingProviderId = new ObjectId(providerId);
+      }
+    }
+
     const bookingAmount = Number(amount);
     const platformFee = Math.round(bookingAmount * (feePercentage / 100) * 100) / 100;
     const providerAmount = Math.round((bookingAmount - platformFee) * 100) / 100;
@@ -60,7 +64,7 @@ router.post("/", authMiddleware, async (req, res) => {
       bookingId: generateBookingId(),
       customerId: new ObjectId(req.user.id),
       customerName: req.user.fullName || req.user.email,
-      providerId: providerId ? new ObjectId(providerId) : null,
+      providerId: bookingProviderId,
       providerName: providerName || "",
       service,
       date,
@@ -77,6 +81,18 @@ router.post("/", authMiddleware, async (req, res) => {
     };
 
     const result = await bookings.insertOne(booking);
+
+    await notifyActivity({
+      type: "booking",
+      user: req.user,
+      details: {
+        bookingId: booking.bookingId,
+        service: booking.service,
+        providerName: booking.providerName,
+        amount: booking.amount,
+        location: booking.location,
+      },
+    });
 
     res.status(201).json({
       message: "Booking created successfully",

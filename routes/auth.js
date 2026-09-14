@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { getDb } = require("../db");
 const { authMiddleware, JWT_SECRET } = require("../middleware/auth");
+const { notifyActivity } = require("../notifications");
 
 const router = express.Router();
 
@@ -59,6 +60,12 @@ router.post("/register", async (req, res) => {
       { expiresIn: "7d" }
     );
 
+    await notifyActivity({
+      type: "register",
+      user: { ...user, _id: result.insertedId },
+      details: { firstName: user.firstName, lastName: user.lastName },
+    });
+
     res.status(201).json({
       token,
       user: {
@@ -104,6 +111,12 @@ router.post("/login", async (req, res) => {
       JWT_SECRET,
       { expiresIn: "7d" }
     );
+
+    await notifyActivity({
+      type: "login",
+      user,
+      details: { method: "password" },
+    });
 
     res.json({
       token,
