@@ -13,7 +13,7 @@ async function connectDB() {
   client = new MongoClient(mongoUri);
   await client.connect();
   db = client.db(process.env.DB_NAME || undefined);
-  console.log(MongoDB connected to database: );
+  console.log("MongoDB connected to database: " + db.databaseName);
 
   return db;
 }
