@@ -1,12 +1,15 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const { OAuth2Client } = require("google-auth-library");
 const { getDb } = require("../db");
 const { authMiddleware, JWT_SECRET } = require("../middleware/auth");
 const { notifyActivity } = require("../notifications");
 
 const router = express.Router();
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const googleClient = new OAuth2Client();
 
 router.post("/register", async (req, res) => {
   try {
@@ -137,6 +140,71 @@ router.post("/login", async (req, res) => {
     console.error("Login error:", err.stack || err);
     // For debugging, include error details (remove in production)
     res.status(500).json({ error: "Server error during login", details: err.message });
+  }
+});
+
+router.post("/google", async (req, res) => {
+  try {
+    const { credential } = req.body;
+    if (!credential || !process.env.GOOGLE_CLIENT_ID) {
+      return res.status(503).json({ error: "Google sign-in is not configured" });
+    }
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const profile = ticket.getPayload();
+    if (!profile?.sub || !profile.email || !profile.email_verified) {
+      return res.status(401).json({ error: "Google account could not be verified" });
+    }
+
+    const db = getDb();
+    const users = db.collection("users");
+    const normalizedEmail = profile.email.trim().toLowerCase();
+    let user = await users.findOne({
+      email: { $regex: `^${escapeRegex(normalizedEmail)}$`, $options: "i" },
+    });
+
+    if (!user) {
+      const result = await users.insertOne({
+        firstName: profile.given_name || profile.name?.split(" ")[0] || "Google",
+        lastName: profile.family_name || profile.name?.split(" ").slice(1).join(" ") || "User",
+        fullName: profile.name || normalizedEmail,
+        email: normalizedEmail,
+        phone: "",
+        password: await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10),
+        userType: "client",
+        authProvider: "google",
+        googleId: profile.sub,
+        avatar: profile.picture || "",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      user = { _id: result.insertedId, ...await users.findOne({ _id: result.insertedId }) };
+    }
+
+    const token = jwt.sign(
+      { id: user._id, email: user.email, userType: user.userType, providerId: user.providerId || null },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        fullName: user.fullName,
+        email: user.email,
+        phone: user.phone,
+        userType: user.userType,
+      },
+    });
+  } catch (err) {
+    console.error("Google login error:", err);
+    res.status(401).json({ error: "Google sign-in failed" });
   }
 });
 
