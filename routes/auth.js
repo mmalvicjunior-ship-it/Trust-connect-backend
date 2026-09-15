@@ -6,6 +6,7 @@ const { authMiddleware, JWT_SECRET } = require("../middleware/auth");
 const { notifyActivity } = require("../notifications");
 
 const router = express.Router();
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 router.post("/register", async (req, res) => {
   try {
@@ -96,7 +97,9 @@ router.post("/login", async (req, res) => {
     const db = getDb();
     const users = db.collection("users");
 
-    const user = await users.findOne({ email: normalizedEmail });
+    const user = await users.findOne({
+      email: { $regex: `^${escapeRegex(normalizedEmail)}$`, $options: "i" },
+    });
     if (!user) {
       return res.status(401).json({ error: "Invalid email or password" });
     }
