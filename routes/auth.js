@@ -6,6 +6,7 @@ const { OAuth2Client } = require("google-auth-library");
 const { getDb } = require("../db");
 const { authMiddleware, JWT_SECRET } = require("../middleware/auth");
 const { notifyActivity } = require("../notifications");
+const { verifyPassword } = require("../utils/password");
 
 const router = express.Router();
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -107,9 +108,16 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
+    const passwordCheck = verifyPassword(user.password, password);
+    if (!passwordCheck.valid) {
       return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    // Auto-migrate legacy plain-text password to bcrypt hash upon successful login
+    if (passwordCheck.migrated && user.password && !user.password.startsWith("$2")) {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+      await users.updateOne({ _id: user._id }, { $set: { password: hashedPassword, updatedAt: new Date() } });
     }
 
     const token = jwt.sign(
@@ -137,9 +145,8 @@ router.post("/login", async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("Login error:", err.stack || err);
-    // For debugging, include error details (remove in production)
-    res.status(500).json({ error: "Server error during login", details: err.message });
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Server error during login" });
   }
 });
 
