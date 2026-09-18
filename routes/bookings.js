@@ -1,12 +1,32 @@
 const express = require("express");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../db");
-const { authMiddleware } = require("../middleware/auth");
-const { notifyActivity } = require("../notifications");
+const { authMiddleware, requireRole } = require("../middleware/auth");
+const { notifyActivity, createNotification } = require("../notifications");
 
 const router = express.Router();
 
-const VALID_STATUSES = ["Pending", "Accepted", "Completed", "Rejected", "Cancelled"];
+const VALID_STATUSES = [
+  "Pending",
+  "Accepted",
+  "Rejected",
+  "Confirmed",
+  "In Progress",
+  "Completed",
+  "Cancelled",
+];
+
+const VALID_TRANSITIONS = {
+  Pending: ["Accepted", "Rejected", "Cancelled"],
+  Accepted: ["Confirmed", "In Progress", "Completed", "Cancelled"],
+  Confirmed: ["In Progress", "Completed", "Cancelled"],
+  "In Progress": ["Completed"],
+  Completed: [],
+  Rejected: [],
+  Cancelled: [],
+};
+
+const PROVIDER_STATUSES = ["Accepted", "Rejected", "Confirmed", "In Progress", "Completed"];
 
 function generateBookingId() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -22,6 +42,10 @@ async function getPlatformFeePercentage() {
   const settings = db.collection("settings");
   const config = await settings.findOne({ key: "platform" });
   return config ? config.platformFeePercentage : 10;
+}
+
+function isProviderForBooking(booking, req) {
+  return booking.providerId && req.user.providerId && booking.providerId.toString() === String(req.user.providerId);
 }
 
 router.post("/", authMiddleware, async (req, res) => {
@@ -82,6 +106,20 @@ router.post("/", authMiddleware, async (req, res) => {
 
     const result = await bookings.insertOne(booking);
 
+    await db.collection("payments").insertOne({
+      bookingId: booking.bookingId,
+      paymentId: "PAY-" + generateBookingId().slice(3),
+      customerId: new ObjectId(req.user.id),
+      providerId: bookingProviderId,
+      amount: bookingAmount,
+      platformFee,
+      providerAmount,
+      status: "Pending",
+      method: "Card",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
     await notifyActivity({
       type: "booking",
       user: req.user,
@@ -92,6 +130,27 @@ router.post("/", authMiddleware, async (req, res) => {
         amount: booking.amount,
         location: booking.location,
       },
+    });
+
+    if (bookingProviderId) {
+      const providerDoc = await db.collection("providers").findOne({ _id: bookingProviderId });
+      if (providerDoc) {
+        await createNotification({
+          userId: providerDoc.userId || null,
+          type: "booking_request",
+          title: "New job request",
+          message: `${req.user.fullName || "A client"} booked ${booking.service} for ${booking.date} at ${booking.time}.`,
+          link: "/dashboard",
+        });
+      }
+    }
+
+    await createNotification({
+      userId: req.user.id,
+      type: "booking",
+      title: `Booking ${booking.bookingId} submitted`,
+      message: `Your ${booking.service} booking is pending. We'll notify you when a provider responds.`,
+      link: "/dashboard",
     });
 
     res.status(201).json({
@@ -124,27 +183,51 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-router.get("/:bookingId", authMiddleware, async (req, res) => {
+router.get("/provider", authMiddleware, requireRole("provider"), async (req, res) => {
   try {
     const db = getDb();
     const bookings = db.collection("bookings");
 
-    const booking = await bookings.findOne({
-      bookingId: req.params.bookingId,
-      customerId: new ObjectId(req.user.id),
-    });
+    if (!req.user.providerId) {
+      return res.status(404).json({ error: "Create a provider profile first" });
+    }
+
+    const providerQuery = { providerId: new ObjectId(req.user.providerId) };
+    const [requests, current, completed] = await Promise.all([
+      bookings.find({ ...providerQuery, status: { $in: ["Pending"] } }).sort({ createdAt: -1 }).toArray(),
+      bookings.find({ ...providerQuery, status: { $in: ["Accepted", "Confirmed", "In Progress"] } }).sort({ date: 1, time: 1 }).toArray(),
+      bookings.find({ ...providerQuery, status: "Completed" }).sort({ completedAt: -1 }).toArray(),
+    ]);
+
+    res.json({ requests, current, completed });
+  } catch (err) {
+    console.error("Get provider bookings error:", err);
+    res.status(500).json({ error: "Server error fetching provider bookings" });
+  }
+});
+
+router.get("/:bookingId", authMiddleware, async (req, res) => {
+  try {
+    const db = getDb();
+    const bookings = db.collection("bookings");
+    const { ObjectId } = require("mongodb");
+
+    let booking;
+    try {
+      booking = await bookings.findOne({ _id: new ObjectId(req.params.bookingId) });
+    } catch {
+      booking = await bookings.findOne({ bookingId: req.params.bookingId });
+    }
 
     if (!booking) {
       return res.status(404).json({ error: "Booking not found" });
     }
 
-    const isCustomer = booking.customerId.toString() === req.user.id;
-    const isProvider = booking.providerId && req.user.providerId && booking.providerId.toString() === req.user.providerId.toString();
-    const customerAllowed = isCustomer && status === "Cancelled";
-    const providerAllowed = isProvider && ["Accepted", "Rejected", "Completed"].includes(status);
+    const isCustomer = booking.customerId && booking.customerId.toString() === req.user.id;
+    const isAdmin = req.user.userType === "admin";
 
-    if (!customerAllowed && !providerAllowed) {
-      return res.status(403).json({ error: "You are not allowed to change this booking" });
+    if (!isCustomer && !isProviderForBooking(booking, req) && !isAdmin) {
+      return res.status(403).json({ error: "You are not allowed to view this booking" });
     }
 
     res.json({ booking });
@@ -165,30 +248,80 @@ router.patch("/:bookingId/status", authMiddleware, async (req, res) => {
     const db = getDb();
     const bookings = db.collection("bookings");
 
-    const booking = await bookings.findOne({ bookingId: req.params.bookingId });
+    let booking;
+    try {
+      booking = await bookings.findOne({ _id: new ObjectId(req.params.bookingId) });
+    } catch {
+      booking = await bookings.findOne({ bookingId: req.params.bookingId });
+    }
+
     if (!booking) {
       return res.status(404).json({ error: "Booking not found" });
     }
 
-    const validTransitions = {
-      Pending: ["Accepted", "Rejected", "Cancelled"],
-      Accepted: ["Completed", "Cancelled"],
-      Completed: [],
-      Rejected: [],
-      Cancelled: [],
-    };
+    const isCustomer = booking.customerId && booking.customerId.toString() === req.user.id;
+    const isAdmin = req.user.userType === "admin";
+    const isProvider = isProviderForBooking(booking, req);
 
-    const allowed = validTransitions[booking.status] || [];
+    if (!isCustomer && !isProvider && !isAdmin) {
+      return res.status(403).json({ error: "You are not allowed to change this booking" });
+    }
+
+    if (PROVIDER_STATUSES.includes(status) && !isProvider && !isAdmin) {
+      return res.status(403).json({ error: "Only the assigned provider can accept or update this booking" });
+    }
+
+    if (status === "Cancelled" && !isCustomer && !isAdmin) {
+      return res.status(403).json({ error: "Only the customer can cancel a booking" });
+    }
+
+    const allowed = VALID_TRANSITIONS[booking.status] || [];
     if (!allowed.includes(status)) {
       return res.status(400).json({
         error: `Cannot change status from "${booking.status}" to "${status}"`,
       });
     }
 
+    const updateFields = { status, updatedAt: new Date() };
+    if (status === "Completed") {
+      updateFields.completedAt = new Date();
+    }
+
     await bookings.updateOne(
-      { bookingId: req.params.bookingId },
-      { $set: { status, updatedAt: new Date() } }
+      { _id: booking._id },
+      { $set: updateFields }
     );
+
+    if (status === "Completed") {
+      await db.collection("payments").updateOne(
+        { bookingId: booking.bookingId },
+        { $set: { status: "Paid", paidAt: new Date(), updatedAt: new Date() } }
+      );
+      await db.collection("providers").updateOne(
+        { _id: booking.providerId },
+        { $inc: { totalJobs: 1 } }
+      );
+    }
+
+    const notify = (userId, title, message) =>
+      createNotification({ userId, type: "booking", title, message, link: "/dashboard" });
+
+    if (booking.customerId) {
+      const msg = `${booking.bookingId} is now "${status}".`;
+      await notify(booking.customerId, `Booking ${booking.bookingId} ${status.toLowerCase()}`, msg);
+    }
+    if (booking.providerId) {
+      const providerDoc = await db.collection("providers").findOne({ _id: booking.providerId });
+      if (providerDoc?.userId && !(booking.customerId && booking.customerId.toString() === providerDoc.userId.toString())) {
+        await notify(providerDoc.userId, `Booking ${booking.bookingId} ${status.toLowerCase()}`, `Booking ${booking.bookingId} is now "${status}".`);
+      }
+    }
+
+    await notifyActivity({
+      type: "booking_status",
+      user: req.user,
+      details: { bookingId: booking.bookingId, service: booking.service, status },
+    });
 
     res.json({ message: `Booking status updated to ${status}`, status });
   } catch (err) {

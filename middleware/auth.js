@@ -20,4 +20,18 @@ function authMiddleware(req, res, next) {
   }
 }
 
-module.exports = { authMiddleware, JWT_SECRET };
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "No token provided" });
+    }
+
+    if (!roles.includes(req.user.userType)) {
+      return res.status(403).json({ error: "You do not have permission to perform this action" });
+    }
+
+    next();
+  };
+}
+
+module.exports = { authMiddleware, requireRole, JWT_SECRET };

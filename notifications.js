@@ -49,4 +49,22 @@ async function notifyActivity({ type, user, details = {} }) {
   }
 }
 
-module.exports = { notifyActivity };
+async function createNotification({ userId, type, title, message, link }) {
+  try {
+    if (!userId) return null;
+
+    await getDb().collection("notifications").insertOne({
+      userId: userId._id ? userId._id : userId,
+      type: type || "general",
+      title: title || "Trust Connect update",
+      message: message || "",
+      link: link || null,
+      read: false,
+      createdAt: new Date(),
+    });
+  } catch (err) {
+    console.error("Create notification error:", err.message);
+  }
+}
+
+module.exports = { notifyActivity, createNotification };

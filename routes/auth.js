@@ -81,6 +81,7 @@ router.post("/register", async (req, res) => {
         email: user.email,
         phone: user.phone,
         userType: user.userType,
+        providerId: user.providerId || null,
       },
     });
   } catch (err) {
@@ -142,6 +143,7 @@ router.post("/login", async (req, res) => {
         email: user.email,
         phone: user.phone,
         userType: user.userType,
+        providerId: user.providerId || null,
       },
     });
   } catch (err) {
@@ -207,6 +209,7 @@ router.post("/google", async (req, res) => {
         email: user.email,
         phone: user.phone,
         userType: user.userType,
+        providerId: user.providerId || null,
       },
     });
   } catch (err) {
@@ -239,6 +242,7 @@ router.get("/me", authMiddleware, async (req, res) => {
         email: user.email,
         phone: user.phone,
         userType: user.userType,
+        providerId: user.providerId || null,
         createdAt: user.createdAt,
       },
     });
