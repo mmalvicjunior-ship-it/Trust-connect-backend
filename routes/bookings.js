@@ -6,7 +6,17 @@ const { notifyActivity, createNotification } = require("../notifications");
 
 const router = express.Router();
 
-const VALID_STATUSES = ["Pending", "Accepted", "Completed", "Rejected", "Cancelled"];
+const VALID_STATUSES = ["Pending", "Accepted", "In Progress", "Completed", "Cancelled"];
+
+const VALID_TRANSITIONS = {
+  Pending: ["Accepted", "Cancelled"],
+  Accepted: ["In Progress", "Cancelled"],
+  "In Progress": ["Completed", "Cancelled"],
+  Completed: [],
+  Cancelled: [],
+};
+
+const PROVIDER_STATUSES = ["Accepted", "In Progress", "Completed"];
 
 function generateBookingId() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -164,6 +174,29 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
+router.get("/provider", authMiddleware, requireRole("provider"), async (req, res) => {
+  try {
+    const db = getDb();
+    const bookings = db.collection("bookings");
+
+    if (!req.user.providerId) {
+      return res.status(404).json({ error: "Create a provider profile first" });
+    }
+
+    const providerQuery = { providerId: new ObjectId(req.user.providerId) };
+    const [requests, current, completed] = await Promise.all([
+      bookings.find({ ...providerQuery, status: "Pending" }).sort({ createdAt: -1 }).toArray(),
+      bookings.find({ ...providerQuery, status: { $in: ["Accepted", "In Progress"] } }).sort({ date: 1, time: 1 }).toArray(),
+      bookings.find({ ...providerQuery, status: "Completed" }).sort({ completedAt: -1 }).toArray(),
+    ]);
+
+    res.json({ requests, current, completed });
+  } catch (err) {
+    console.error("Get provider bookings error:", err);
+    res.status(500).json({ error: "Server error fetching provider bookings" });
+  }
+});
+
 router.get("/:bookingId", authMiddleware, async (req, res) => {
   try {
     const db = getDb();
@@ -217,15 +250,23 @@ router.patch("/:bookingId/status", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Booking not found" });
     }
 
-    const validTransitions = {
-      Pending: ["Accepted", "Rejected", "Cancelled"],
-      Accepted: ["Completed", "Cancelled"],
-      Completed: [],
-      Rejected: [],
-      Cancelled: [],
-    };
+    const isCustomer = booking.customerId && booking.customerId.toString() === req.user.id;
+    const isAdmin = req.user.userType === "admin";
+    const isProvider = isProviderForBooking(booking, req);
 
-    const allowed = validTransitions[booking.status] || [];
+    if (!isCustomer && !isProvider && !isAdmin) {
+      return res.status(403).json({ error: "You are not allowed to change this booking" });
+    }
+
+    if (PROVIDER_STATUSES.includes(status) && !isProvider && !isAdmin) {
+      return res.status(403).json({ error: "Only the assigned provider can update this booking" });
+    }
+
+    if (status === "Cancelled" && !isCustomer && !isProvider && !isAdmin) {
+      return res.status(403).json({ error: "You are not allowed to cancel this booking" });
+    }
+
+    const allowed = VALID_TRANSITIONS[booking.status] || [];
     if (!allowed.includes(status)) {
       return res.status(400).json({
         error: `Cannot change status from "${booking.status}" to "${status}"`,
@@ -237,10 +278,7 @@ router.patch("/:bookingId/status", authMiddleware, async (req, res) => {
       updateFields.completedAt = new Date();
     }
 
-    await bookings.updateOne(
-      { bookingId: req.params.bookingId },
-      { $set: { status, updatedAt: new Date() } }
-    );
+    await bookings.updateOne({ _id: booking._id }, { $set: updateFields });
 
     res.json({ message: `Booking status updated to ${status}`, status });
   } catch (err) {
