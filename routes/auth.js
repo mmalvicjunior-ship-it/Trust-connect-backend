@@ -59,8 +59,8 @@ router.post("/register", async (req, res) => {
 
     const result = await users.insertOne(user);
 
-    const token = jwt.sign(
-      { id: result.insertedId, email: user.email, userType: user.userType, providerId: user.providerId || null },
+const token = jwt.sign(
+      { id: user._id, email: user.email, userType: user.userType, providerId: user.providerId || null, fullName: user.fullName },
       JWT_SECRET,
       { expiresIn: "7d" }
     );
@@ -90,13 +90,20 @@ router.post("/register", async (req, res) => {
   }
 });
 
+const VALID_ROLES = ["client", "provider", "admin"];
+
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, userType } = req.body;
     const normalizedEmail = String(email || "").trim().toLowerCase();
 
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required" });
+    }
+
+    const requestedRole = userType === undefined || userType === null ? null : String(userType).trim().toLowerCase();
+    if (requestedRole !== null && !VALID_ROLES.includes(requestedRole)) {
+      return res.status(400).json({ error: 'Role must be one of: client, provider, admin' });
     }
 
     const db = getDb();
@@ -112,6 +119,14 @@ router.post("/login", async (req, res) => {
     const passwordCheck = verifyPassword(user.password, password);
     if (!passwordCheck.valid) {
       return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    if (requestedRole !== null && String(user.userType).toLowerCase() !== requestedRole) {
+      return res.status(403).json({
+        error: `This account is registered as ${
+          user.userType === "provider" ? "a provider" : user.userType
+        }. Please sign in with the correct account type.`,
+      });
     }
 
     // Auto-migrate legacy plain-text password to bcrypt hash upon successful login

@@ -6,27 +6,7 @@ const { notifyActivity, createNotification } = require("../notifications");
 
 const router = express.Router();
 
-const VALID_STATUSES = [
-  "Pending",
-  "Accepted",
-  "Rejected",
-  "Confirmed",
-  "In Progress",
-  "Completed",
-  "Cancelled",
-];
-
-const VALID_TRANSITIONS = {
-  Pending: ["Accepted", "Rejected", "Cancelled"],
-  Accepted: ["Confirmed", "In Progress", "Completed", "Cancelled"],
-  Confirmed: ["In Progress", "Completed", "Cancelled"],
-  "In Progress": ["Completed"],
-  Completed: [],
-  Rejected: [],
-  Cancelled: [],
-};
-
-const PROVIDER_STATUSES = ["Accepted", "Rejected", "Confirmed", "In Progress", "Completed"];
+const VALID_STATUSES = ["Pending", "Accepted", "Completed", "Rejected", "Cancelled"];
 
 function generateBookingId() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -127,6 +107,7 @@ router.post("/", authMiddleware, async (req, res) => {
         bookingId: booking.bookingId,
         service: booking.service,
         providerName: booking.providerName,
+        customerName: booking.customerName,
         amount: booking.amount,
         location: booking.location,
       },
@@ -183,29 +164,6 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-router.get("/provider", authMiddleware, requireRole("provider"), async (req, res) => {
-  try {
-    const db = getDb();
-    const bookings = db.collection("bookings");
-
-    if (!req.user.providerId) {
-      return res.status(404).json({ error: "Create a provider profile first" });
-    }
-
-    const providerQuery = { providerId: new ObjectId(req.user.providerId) };
-    const [requests, current, completed] = await Promise.all([
-      bookings.find({ ...providerQuery, status: { $in: ["Pending"] } }).sort({ createdAt: -1 }).toArray(),
-      bookings.find({ ...providerQuery, status: { $in: ["Accepted", "Confirmed", "In Progress"] } }).sort({ date: 1, time: 1 }).toArray(),
-      bookings.find({ ...providerQuery, status: "Completed" }).sort({ completedAt: -1 }).toArray(),
-    ]);
-
-    res.json({ requests, current, completed });
-  } catch (err) {
-    console.error("Get provider bookings error:", err);
-    res.status(500).json({ error: "Server error fetching provider bookings" });
-  }
-});
-
 router.get("/:bookingId", authMiddleware, async (req, res) => {
   try {
     const db = getDb();
@@ -259,23 +217,15 @@ router.patch("/:bookingId/status", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Booking not found" });
     }
 
-    const isCustomer = booking.customerId && booking.customerId.toString() === req.user.id;
-    const isAdmin = req.user.userType === "admin";
-    const isProvider = isProviderForBooking(booking, req);
+    const validTransitions = {
+      Pending: ["Accepted", "Rejected", "Cancelled"],
+      Accepted: ["Completed", "Cancelled"],
+      Completed: [],
+      Rejected: [],
+      Cancelled: [],
+    };
 
-    if (!isCustomer && !isProvider && !isAdmin) {
-      return res.status(403).json({ error: "You are not allowed to change this booking" });
-    }
-
-    if (PROVIDER_STATUSES.includes(status) && !isProvider && !isAdmin) {
-      return res.status(403).json({ error: "Only the assigned provider can accept or update this booking" });
-    }
-
-    if (status === "Cancelled" && !isCustomer && !isAdmin) {
-      return res.status(403).json({ error: "Only the customer can cancel a booking" });
-    }
-
-    const allowed = VALID_TRANSITIONS[booking.status] || [];
+    const allowed = validTransitions[booking.status] || [];
     if (!allowed.includes(status)) {
       return res.status(400).json({
         error: `Cannot change status from "${booking.status}" to "${status}"`,
@@ -288,40 +238,9 @@ router.patch("/:bookingId/status", authMiddleware, async (req, res) => {
     }
 
     await bookings.updateOne(
-      { _id: booking._id },
-      { $set: updateFields }
+      { bookingId: req.params.bookingId },
+      { $set: { status, updatedAt: new Date() } }
     );
-
-    if (status === "Completed") {
-      await db.collection("payments").updateOne(
-        { bookingId: booking.bookingId },
-        { $set: { status: "Paid", paidAt: new Date(), updatedAt: new Date() } }
-      );
-      await db.collection("providers").updateOne(
-        { _id: booking.providerId },
-        { $inc: { totalJobs: 1 } }
-      );
-    }
-
-    const notify = (userId, title, message) =>
-      createNotification({ userId, type: "booking", title, message, link: "/dashboard" });
-
-    if (booking.customerId) {
-      const msg = `${booking.bookingId} is now "${status}".`;
-      await notify(booking.customerId, `Booking ${booking.bookingId} ${status.toLowerCase()}`, msg);
-    }
-    if (booking.providerId) {
-      const providerDoc = await db.collection("providers").findOne({ _id: booking.providerId });
-      if (providerDoc?.userId && !(booking.customerId && booking.customerId.toString() === providerDoc.userId.toString())) {
-        await notify(providerDoc.userId, `Booking ${booking.bookingId} ${status.toLowerCase()}`, `Booking ${booking.bookingId} is now "${status}".`);
-      }
-    }
-
-    await notifyActivity({
-      type: "booking_status",
-      user: req.user,
-      details: { bookingId: booking.bookingId, service: booking.service, status },
-    });
 
     res.json({ message: `Booking status updated to ${status}`, status });
   } catch (err) {

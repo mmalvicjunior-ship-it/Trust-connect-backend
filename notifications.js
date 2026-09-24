@@ -20,6 +20,7 @@ async function notifyActivity({ type, user, details = {} }) {
     type,
     userId: user?._id || user?.id || null,
     email: user?.email || "",
+    name: user?.fullName || [user?.firstName, user?.lastName].filter(Boolean).join(" ") || "",
     userType: user?.userType || "",
     details,
     createdAt: new Date(),
