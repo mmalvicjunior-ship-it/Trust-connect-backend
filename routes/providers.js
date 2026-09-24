@@ -11,7 +11,7 @@ router.get("/", async (req, res) => {
     const db = getDb();
     const providers = db.collection("providers");
 
-    const allProviders = await providers.find({ isAvailable: true }).sort({ rating: -1 }).toArray();
+    const allProviders = await providers.find({ isAvailable: true }, { projection: { userId: 0 } }).sort({ rating: -1 }).toArray();
     res.json({ providers: allProviders });
   } catch (err) {
     console.error("Get providers error:", err);
@@ -107,7 +107,7 @@ router.get("/saved", authMiddleware, async (req, res) => {
     const ids = (user?.savedProviderIds || []).map((id) => (ObjectId.isValid(id) ? new ObjectId(id) : id));
 
     const saved = ids.length
-      ? await providers.find({ _id: { $in: ids } }).toArray()
+      ? await providers.find({ _id: { $in: ids } }, { projection: { userId: 0 } }).toArray()
       : [];
 
     res.json({ savedProviders: saved });
@@ -154,11 +154,18 @@ router.get("/earnings", authMiddleware, requireRole("provider"), async (req, res
     const db = getDb();
     const bookings = db.collection("bookings");
 
-    if (!req.user.providerId) {
+    let providerId = req.user.providerId && ObjectId.isValid(req.user.providerId)
+      ? new ObjectId(req.user.providerId)
+      : null;
+    if (!providerId && ObjectId.isValid(req.user.id)) {
+      const provider = await db.collection("providers").findOne({ userId: new ObjectId(req.user.id) });
+      providerId = provider?._id || null;
+    }
+
+    if (!providerId) {
       return res.json({ totalEarnings: 0, platformFees: 0, jobCount: 0, weekly: [], recent: [] });
     }
 
-    const providerId = new ObjectId(req.user.providerId);
     const completed = await bookings.find({ providerId, status: "Completed" }).toArray();
 
     const totalEarnings = completed.reduce((sum, b) => sum + (Number(b.providerAmount) || 0), 0);
@@ -243,9 +250,9 @@ router.get("/:id", async (req, res) => {
 
     let provider;
     try {
-      provider = await providers.findOne({ _id: new ObjectId(req.params.id) });
+      provider = await providers.findOne({ _id: new ObjectId(req.params.id) }, { projection: { userId: 0 } });
     } catch {
-      provider = await providers.findOne({ slug: req.params.id });
+      provider = await providers.findOne({ slug: req.params.id }, { projection: { userId: 0 } });
     }
 
     if (!provider) {

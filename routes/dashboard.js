@@ -61,25 +61,25 @@ router.get("/", authMiddleware, async (req, res) => {
       const providerId = provider._id;
       const today = localDateString();
 
-      const [todayJobs, pendingRequests, currentJobs, completed, recentReviews, reviewCount] =
-        await Promise.all([
-          bookings
-            .find({ providerId, status: { $in: ["Accepted", "Confirmed", "In Progress"] }, date: today })
-            .toArray(),
-          bookings.countDocuments({ providerId, status: "Pending" }),
-          bookings.find({ providerId, status: { $in: ["Accepted", "Confirmed", "In Progress"] } }).sort({ date: 1, time: 1 }).toArray(),
-          bookings.countDocuments({ providerId, status: "Completed" }),
-          reviews.find({ providerId }).sort({ createdAt: -1 }).limit(4).toArray(),
-          reviews.countDocuments({ providerId }),
-        ]);
+      const [allBookings, recentReviews, reviewCount] = await Promise.all([
+        bookings.find({ providerId }).toArray(),
+        reviews.find({ providerId }).sort({ createdAt: -1 }).limit(4).toArray(),
+        reviews.countDocuments({ providerId }),
+      ]);
+
+      const todayJobs = allBookings.filter(
+        (b) => ["Accepted", "Confirmed", "In Progress"].includes(b.status) && b.date === today
+      );
+      const pendingRequests = allBookings.filter((b) => b.status === "Pending").length;
+      const currentJobs = allBookings
+        .filter((b) => ["Accepted", "Confirmed", "In Progress"].includes(b.status))
+        .sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
+      const completedBookings = allBookings.filter((b) => b.status === "Completed");
 
       const upcomingJobs = currentJobs.slice(0, 5);
 
-      const earnings = await bookings
-        .find({ providerId, status: "Completed" })
-        .toArray();
-      const totalEarnings = earnings.reduce((sum, b) => sum + (Number(b.providerAmount) || 0), 0);
-      const platformFees = earnings.reduce((sum, b) => sum + (Number(b.platformFee) || 0), 0);
+      const totalEarnings = completedBookings.reduce((sum, b) => sum + (Number(b.providerAmount) || 0), 0);
+      const platformFees = completedBookings.reduce((sum, b) => sum + (Number(b.platformFee) || 0), 0);
 
       return res.json({
         role: "provider",
@@ -90,14 +90,22 @@ router.get("/", authMiddleware, async (req, res) => {
           todayJobs: todayJobs.length,
           pendingRequests,
           currentJobs: currentJobs.length,
-          completed,
+          completed: completedBookings.length,
+          totalClients: new Set(
+            allBookings.map((b) => (b.customerId ? String(b.customerId) : b.customerName || ""))
+          ).size,
+          totalBookings: allBookings.length,
+          accepted: allBookings.filter((b) => b.status === "Accepted").length,
+          inProgress: allBookings.filter((b) => b.status === "In Progress").length,
+          rejected: allBookings.filter((b) => b.status === "Rejected").length,
+          cancelled: allBookings.filter((b) => ["Cancelled", "Rejected"].includes(b.status)).length,
           rating: provider.rating || 0,
           totalReviews: reviewCount,
           verificationStatus: provider.verificationStatus || "Unverified",
         },
         upcomingJobs,
         recentReviews: recentReviews,
-        earnings: { totalEarnings, platformFees, jobCount: completed },
+        earnings: { totalEarnings, platformFees, jobCount: completedBookings.length },
       });
     }
 
