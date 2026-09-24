@@ -34,8 +34,18 @@ async function getPlatformFeePercentage() {
   return config ? config.platformFeePercentage : 10;
 }
 
-function isProviderForBooking(booking, req) {
-  return booking.providerId && req.user.providerId && booking.providerId.toString() === String(req.user.providerId);
+async function getProviderIdForUser(db, user) {
+  if (user.userType !== "provider") {
+    return null;
+  }
+  if (user.providerId && ObjectId.isValid(user.providerId)) {
+    return new ObjectId(user.providerId);
+  }
+  if (!ObjectId.isValid(user.id)) {
+    return null;
+  }
+  const provider = await db.collection("providers").findOne({ userId: new ObjectId(user.id) });
+  return provider?._id || null;
 }
 
 router.post("/", authMiddleware, async (req, res) => {
@@ -181,11 +191,12 @@ router.get("/provider", authMiddleware, requireRole("provider"), async (req, res
     const db = getDb();
     const bookings = db.collection("bookings");
 
-    if (!req.user.providerId) {
+    const providerId = await getProviderIdForUser(db, req.user);
+    if (!providerId) {
       return res.status(404).json({ error: "Create a provider profile first" });
     }
 
-    const providerQuery = { providerId: new ObjectId(req.user.providerId) };
+    const providerQuery = { providerId };
     const [requests, current, completed] = await Promise.all([
       bookings.find({ ...providerQuery, status: "Pending" }).sort({ createdAt: -1 }).toArray(),
       bookings.find({ ...providerQuery, status: { $in: ["Accepted", "In Progress"] } }).sort({ date: 1, time: 1 }).toArray(),
@@ -218,8 +229,10 @@ router.get("/:bookingId", authMiddleware, async (req, res) => {
 
     const isCustomer = booking.customerId && booking.customerId.toString() === req.user.id;
     const isAdmin = req.user.userType === "admin";
+    const providerId = await getProviderIdForUser(db, req.user);
+    const isProvider = providerId && booking.providerId && booking.providerId.toString() === providerId.toString();
 
-    if (!isCustomer && !isProviderForBooking(booking, req) && !isAdmin) {
+    if (!isCustomer && !isProvider && !isAdmin) {
       return res.status(403).json({ error: "You are not allowed to view this booking" });
     }
 
@@ -254,7 +267,8 @@ router.patch("/:bookingId/status", authMiddleware, async (req, res) => {
 
     const isCustomer = booking.customerId && booking.customerId.toString() === req.user.id;
     const isAdmin = req.user.userType === "admin";
-    const isProvider = isProviderForBooking(booking, req);
+    const providerId = await getProviderIdForUser(db, req.user);
+    const isProvider = providerId && booking.providerId && booking.providerId.toString() === providerId.toString();
 
     if (!isCustomer && !isProvider && !isAdmin) {
       return res.status(403).json({ error: "You are not allowed to change this booking" });
