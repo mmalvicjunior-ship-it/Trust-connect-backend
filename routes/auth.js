@@ -267,4 +267,15 @@ router.get("/me", authMiddleware, async (req, res) => {
   }
 });
 
+router.post("/logout", authMiddleware, async (req, res) => {
+  await notifyActivity({
+    type: "logout",
+    action: "user_logout",
+    label: "Signed out",
+    user: req.user,
+    details: {},
+  });
+  res.json({ message: "Signed out" });
+});
+
 module.exports = router;

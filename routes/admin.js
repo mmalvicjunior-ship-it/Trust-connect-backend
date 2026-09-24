@@ -75,6 +75,13 @@ router.patch("/users/:id", async (req, res) => {
       { $set: set }
     );
 
+    await notifyActivity({
+      type: "admin_user_updated",
+      user: req.user,
+      label: `Updated user ${req.params.id}`,
+      details: { userId: req.params.id, userType, active },
+    });
+
     res.json({ message: "User updated" });
   } catch (err) {
     console.error("Admin update user error:", err);
@@ -125,6 +132,15 @@ router.patch("/providers/:id", async (req, res) => {
 
     if (result.modifiedCount === 0) {
       return res.status(404).json({ error: "Provider not found" });
+    }
+
+    if (verificationStatus !== undefined) {
+      await notifyActivity({
+        type: "verification_reviewed",
+        user: req.user,
+        label: `${verificationStatus} provider verification`,
+        details: { providerId: req.params.id, verificationStatus },
+      });
     }
 
     res.json({ message: "Provider updated" });
@@ -182,6 +198,13 @@ router.patch("/bookings/:bookingId/status", async (req, res) => {
     if (status === "Completed") updateFields.completedAt = new Date();
 
     await bookings.updateOne({ _id: booking._id }, { $set: updateFields });
+
+    await notifyActivity({
+      type: "admin_booking_status_updated",
+      user: req.user,
+      label: `Admin changed Booking #${booking.bookingId} to ${status}`,
+      details: { bookingId: booking.bookingId, service: booking.service, previousStatus: booking.status, status },
+    });
 
     if (status === "Completed") {
       await db.collection("payments").updateOne(
@@ -321,6 +344,8 @@ router.post("/services", async (req, res) => {
       updatedAt: new Date(),
     });
 
+    await notifyActivity({ type: "service_created", user: req.user, label: `Created service category ${String(name).trim()}`, details: {} });
+
     res.status(201).json({ message: "Service added", service: { _id: result.insertedId, name, icon: icon || "fa-tools", desc: desc || "", active: true } });
   } catch (err) {
     console.error("Admin add service error:", err);
@@ -342,6 +367,8 @@ router.patch("/services/:id", async (req, res) => {
       { $set: set }
     );
 
+    await notifyActivity({ type: "service_updated", user: req.user, label: `Updated service category ${req.params.id}`, details: { active } });
+
     res.json({ message: "Service updated" });
   } catch (err) {
     console.error("Admin update service error:", err);
@@ -352,6 +379,7 @@ router.patch("/services/:id", async (req, res) => {
 router.delete("/services/:id", async (req, res) => {
   try {
     await getDb().collection("service_categories").deleteOne({ _id: new ObjectId(req.params.id) });
+    await notifyActivity({ type: "service_deleted", user: req.user, label: `Deleted service category ${req.params.id}`, details: {} });
     res.json({ message: "Service removed" });
   } catch (err) {
     console.error("Admin delete service error:", err);
@@ -511,7 +539,23 @@ router.get("/analytics", async (req, res) => {
 /* ---------------- Recent activity ---------------- */
 router.get("/activity", async (req, res) => {
   try {
-    const items = await getDb().collection("activity_logs").find().sort({ createdAt: -1 }).limit(100).toArray();
+    const { role, actionType, q, from, to } = req.query;
+    const filter = {};
+    if (["client", "provider", "admin"].includes(role)) filter.$or = [{ role }, { userType: role }];
+    if (actionType && actionType !== "all") {
+      const actionRegex = actionType === "bookings" ? /^booking_/ : actionType === "auth" ? /^user_(registered|login|logout)$/ : actionType === "verifications" ? /verification/ : actionType === "reviews" ? /review/ : null;
+      if (actionRegex) filter.action = actionRegex;
+    }
+    if (from || to) {
+      filter.createdAt = {};
+      if (from) filter.createdAt.$gte = new Date(from);
+      if (to) filter.createdAt.$lte = new Date(`${to}T23:59:59.999Z`);
+    }
+    if (q) {
+      const rx = new RegExp(String(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      filter.$and = [{ $or: [{ userName: rx }, { name: rx }, { userEmail: rx }, { email: rx }, { "details.bookingId": rx }, { label: rx }] }];
+    }
+    const items = await getDb().collection("activity_logs").find(filter).sort({ createdAt: -1 }).limit(200).toArray();
     res.json({ activity: items });
   } catch (err) {
     console.error("Admin activity error:", err);

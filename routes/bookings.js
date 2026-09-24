@@ -112,6 +112,8 @@ router.post("/", authMiddleware, async (req, res) => {
 
     await notifyActivity({
       type: "booking",
+      action: "booking_created",
+      label: `Created Booking #${booking.bookingId}`,
       user: req.user,
       details: {
         bookingId: booking.bookingId,
@@ -279,6 +281,14 @@ router.patch("/:bookingId/status", authMiddleware, async (req, res) => {
     }
 
     await bookings.updateOne({ _id: booking._id }, { $set: updateFields });
+
+    await notifyActivity({
+      type: "booking_status_updated",
+      action: `booking_${status.toLowerCase().replaceAll(" ", "_")}`,
+      label: `Booking #${booking.bookingId} marked ${status}`,
+      user: req.user,
+      details: { bookingId: booking.bookingId, service: booking.service, previousStatus: booking.status, status },
+    });
 
     res.json({ message: `Booking status updated to ${status}`, status });
   } catch (err) {

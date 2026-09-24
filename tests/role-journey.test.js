@@ -2,7 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'role-journey-secret';
 
 // In-memory collections for end-to-end multi-role testing
 const collections = {
@@ -163,6 +166,11 @@ test('Complete Role Ecosystem: Client, Provider, and Admin', async (t) => {
       verificationStatus: 'Verified',
       isAvailable: true,
     });
+    providerToken = jwt.sign(
+      { id: providerId, email: 'farai.provider@trustconnect.zw', userType: 'provider', providerId, fullName: 'Farai Electrician' },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
   });
 
   await t.test('3. Admin Account Setup & Verification', async () => {
@@ -209,9 +217,27 @@ test('Complete Role Ecosystem: Client, Provider, and Admin', async (t) => {
     assert.equal(bookRes.status, 201);
     bookingId = bookRes.data.booking.bookingId;
     assert.ok(bookingId);
+
+    const created = collections.activity_logs.find((item) => item.action === 'booking_created');
+    assert.equal(created.details.bookingId, bookingId);
+    assert.equal(created.role, 'client');
   });
 
-  await t.test('5. Admin views full dashboard and sees client/provider happenings', async () => {
+  await t.test('5. Provider completes the booking and actions are recorded', async () => {
+    for (const status of ['Accepted', 'In Progress', 'Completed']) {
+      const response = await apiCall('PATCH', `/api/bookings/${bookingId}/status`, providerToken, { status });
+      assert.equal(response.status, 200);
+    }
+
+    const bookingEvents = collections.activity_logs.filter((item) => item.details?.bookingId === bookingId);
+    assert.deepEqual(
+      bookingEvents.filter((item) => item.details.status).map((item) => item.details.status),
+      ['Completed', 'In Progress', 'Accepted']
+    );
+    assert.ok(bookingEvents.filter((item) => item.role === 'provider').length >= 3);
+  });
+
+  await t.test('6. Admin views the exact audit trail and non-admins are forbidden', async () => {
     const adminDash = await apiCall('GET', '/api/dashboard', adminToken);
     assert.equal(adminDash.status, 200);
     assert.equal(adminDash.data.role, 'admin');
@@ -221,9 +247,17 @@ test('Complete Role Ecosystem: Client, Provider, and Admin', async (t) => {
 
     // Admin inspects recent activity log
     assert.ok(Array.isArray(adminDash.data.recentActivity), 'Admin has activity stream');
+
+    const audit = await apiCall('GET', `/api/admin/activity?q=${bookingId}`, adminToken);
+    assert.equal(audit.status, 200);
+    assert.ok(audit.data.activity.some((item) => item.action === 'booking_created'));
+    assert.ok(audit.data.activity.some((item) => item.action === 'booking_completed'));
+
+    const forbidden = await apiCall('GET', '/api/admin/activity', clientToken);
+    assert.equal(forbidden.status, 403);
   });
 
-  await t.test('6. Admin inspects and manages users via Admin API', async () => {
+  await t.test('7. Admin inspects and manages users via Admin API', async () => {
     const usersRes = await apiCall('GET', '/api/admin/users', adminToken);
     assert.equal(usersRes.status, 200);
     assert.ok(usersRes.data.users.length >= 3, 'Admin sees all clients, providers, and admins');

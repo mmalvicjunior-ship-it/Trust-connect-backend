@@ -73,6 +73,22 @@ router.patch("/me", authMiddleware, requireRole("provider"), async (req, res) =>
 
     await providers.updateOne({ _id: provider._id }, { $set: update });
 
+    if (Object.keys(update).some((key) => key !== "updatedAt")) {
+      await notifyActivity({
+        type: "profile_updated",
+        action: update.isAvailable !== undefined && Object.keys(update).length === 2 ? "availability_updated" : "profile_updated",
+        label: update.isAvailable !== undefined && Object.keys(update).length === 2
+          ? `Provider availability set ${update.isAvailable ? "Online" : "Offline"}`
+          : "Updated provider profile",
+        user: req.user,
+        details: {
+          businessName: update.businessName,
+          specialty: update.specialty,
+          active: update.isAvailable,
+        },
+      });
+    }
+
     const updated = await providers.findOne({ _id: provider._id });
     res.json({ message: "Provider profile updated", provider: updated });
   } catch (err) {
@@ -286,6 +302,14 @@ router.post("/", authMiddleware, async (req, res) => {
       { _id: new ObjectId(req.user.id) },
       { $set: { providerId: result.insertedId, updatedAt: new Date() } }
     );
+
+    await notifyActivity({
+      type: "profile_created",
+      action: "profile_created",
+      label: `Created provider profile for ${businessName}`,
+      user: { ...req.user, providerId: result.insertedId },
+      details: { businessName, specialty, providerId: result.insertedId },
+    });
 
     res.status(201).json({
       message: "Provider profile created",

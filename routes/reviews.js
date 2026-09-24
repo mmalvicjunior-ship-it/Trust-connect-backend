@@ -2,6 +2,7 @@ const express = require("express");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../db");
 const { authMiddleware } = require("../middleware/auth");
+const { notifyActivity } = require("../notifications");
 
 const router = express.Router();
 
@@ -63,6 +64,13 @@ router.post("/", authMiddleware, async (req, res) => {
       { _id: new ObjectId(providerId) },
       { $set: { rating: avgRating, totalReviews: providerReviews.length } }
     );
+
+    await notifyActivity({
+      type: "review_submitted",
+      user: req.user,
+      label: `Submitted ${rating}-star review for Booking #${bookingId}`,
+      details: { bookingId, providerId, rating },
+    });
 
     res.status(201).json({
       message: "Review submitted successfully",
